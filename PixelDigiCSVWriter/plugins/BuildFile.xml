@@ -1,0 +1,12 @@
+<use name="FWCore/Framework"/>
+<use name="FWCore/ParameterSet"/>
+<use name="FWCore/Utilities"/>
+<use name="FWCore/MessageLogger"/>
+<use name="SimDataFormats/TrackingHit"/>
+<use name="SimDataFormats/CrossingFrame"/>
+<use name="DataFormats/EcalDigi"/>
+<use name="Geometry/CommonTopologies"/>
+<use name="Geometry/TrackerGeometryBuilder"/>
+<use name="Geometry/Records"/>
+<flags EDM_PLUGIN="1"/>
+<flags CXXFLAGS="-Wno-error=sign-compare"/>
