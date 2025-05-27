@@ -17,10 +17,7 @@
 //
 
 // system include files
-#include <cstdint>
-#include <memory>
-#include <vector>
-#include <string>
+
 
 // user include files
 #include "FWCore/Framework/interface/Frameworkfwd.h"
@@ -32,18 +29,17 @@
 
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
 #include "FWCore/Utilities/interface/InputTag.h"
-#include "DataFormats/TrackReco/interface/Track.h"
 #include "DataFormats/TrackReco/interface/TrackFwd.h"
 #include "Geometry/Records/interface/TrackerDigiGeometryRecord.h"
 #include "Geometry/TrackerGeometryBuilder/interface/TrackerGeometry.h"
 #include "DataFormats/Common/interface/DetSetVector.h"
 #include "DataFormats/SiStripDigi/interface/SiStripDigi.h"
 #include "Geometry/CommonDetUnit/interface/GeomDet.h"
-#include "DataFormats/GeometryVector/interface/GlobalPoint.h"
-#include "DataFormats/GeometryVector/interface/LocalPoint.h"
 
-#include "TFile.h"
-#include "TTree.h"
+extern "C" {
+#include "hdf5.h"
+}
+
 //
 // class declaration
 //
@@ -74,9 +70,23 @@ private:
   std::ofstream outFile_;
   std::string outputFilename_;
 
-#ifdef THIS_IS_AN_EVENTSETUP_EXAMPLE
-  edm::ESGetToken<SetupData, SetupRecord> setupToken_;
-#endif
+  // For HDF5 tracking
+  hsize_t current_size_;
+  hsize_t chunk_size_;
+
+  hid_t h5file_;
+  hid_t dataset_;
+  hid_t dataspace_;
+  hid_t memtype_;
+  hid_t plist_;
+
+  struct DigiEntry {
+    uint32_t event;
+    uint32_t detid;
+    int32_t strip;
+    int32_t adc;
+    float x, y, z;
+  };
 };
 
 //
@@ -90,18 +100,22 @@ private:
 //
 // constructors and destructor
 //
-StripDigiHDF5Writer::StripDigiHDF5Writer(const edm::ParameterSet& iConfig) {
+StripDigiHDF5Writer::StripDigiHDF5Writer(const edm::ParameterSet& iConfig)
+    : current_size_(0), chunk_size_(1024),
+      h5file_(-1), dataset_(-1), dataspace_(-1), memtype_(-1), plist_(-1) {
   digiToken_ = consumes<edm::DetSetVector<SiStripDigi>>(
       edm::InputTag("simSiStripDigis", "ZeroSuppressed", "DIGI"));
   tkGeomToken_ = esConsumes<TrackerGeometry, TrackerDigiGeometryRecord>();
 
   outputFilename_ = iConfig.getParameter<std::string>("outputFile");
-  outFile_.open(outputFilename_);
-  outFile_ << "event,detid,strip,adc,x,y,z\n";
 }
 
 StripDigiHDF5Writer::~StripDigiHDF5Writer() {
-  outFile_.close();
+  if (dataset_ >= 0) H5Dclose(dataset_);
+  if (dataspace_ >= 0) H5Sclose(dataspace_);
+  if (memtype_ >= 0) H5Tclose(memtype_);
+  if (plist_ >= 0) H5Pclose(plist_);
+  if (h5file_ >= 0) H5Fclose(h5file_);
 }
 
 //
@@ -110,20 +124,18 @@ StripDigiHDF5Writer::~StripDigiHDF5Writer() {
 
 // ------------ method called for each event  ------------
 void StripDigiHDF5Writer::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup) {
-  // Get SiStripDigis
   edm::Handle<edm::DetSetVector<SiStripDigi>> digis;
   iEvent.getByToken(digiToken_, digis);
 
-  // Get TrackerGeometry from EventSetup
   const auto& tkGeom = iSetup.getData(tkGeomToken_);
+
+  std::vector<DigiEntry> entries;
 
   for (const auto& detSet : *digis) {
     uint32_t detid = detSet.id;
-
-    // Get the detector unit
     const GeomDet* geomDet = tkGeom.idToDet(detid);
     if (!geomDet) {
-      edm::LogWarning("SiStripDigiToCSVAnalyzer") << "No GeomDet found for detid " << detid;
+      edm::LogWarning("StripDigiHDF5Writer") << "No GeomDet found for detid " << detid;
       continue;
     }
 
@@ -133,37 +145,72 @@ void StripDigiHDF5Writer::analyze(const edm::Event& iEvent, const edm::EventSetu
       int strip = digi.strip();
       int adc = digi.adc();
 
-      // Calculate local strip coordinate (center of the strip)
-      LocalPoint local(strip * 0.01, 0.0, 0.0);  // 0.01 cm pitch approximation
-
-      // Transform to global
+      LocalPoint local(strip * 0.01, 0.0, 0.0);
       GlobalPoint global = surface.toGlobal(local);
 
-      // Write to CSV
-      outFile_ << iEvent.id().event() << ","
-               << detid << ","
-               << strip << ","
-               << adc << ","
-               << global.x() << ","
-               << global.y() << ","
-               << global.z() << "\n";
+      DigiEntry entry;
+      entry.event = iEvent.id().event();
+      entry.detid = detid;
+      entry.strip = strip;
+      entry.adc = adc;
+      entry.x = global.x();
+      entry.y = global.y();
+      entry.z = global.z();
 
-      /*
-      The CMS global coordinate system is defined as:
-      z axis → along the beam line
-      x axis → pointing towards the center of the LHC ring (from CMS)
-      y axis → upwards (perpendicular to Earth's surface)
-
-      Units are cm.
-      
-      */
+      entries.push_back(entry);
     }
+  }
+
+  if (!entries.empty()) {
+    hsize_t num_new = entries.size();
+    hsize_t old_size = current_size_;
+    hsize_t new_size = old_size + num_new;
+
+    // Extend dataset
+    H5Dset_extent(dataset_, &new_size);
+
+    // Select hyperslab
+    hid_t filespace = H5Dget_space(dataset_);
+    hsize_t start[1] = {old_size};
+    hsize_t count[1] = {num_new};
+    H5Sselect_hyperslab(filespace, H5S_SELECT_SET, start, NULL, count, NULL);
+
+    // Define memory space
+    hid_t memspace = H5Screate_simple(1, count, NULL);
+
+    // Write data
+    H5Dwrite(dataset_, memtype_, memspace, filespace, H5P_DEFAULT, entries.data());
+
+    H5Sclose(memspace);
+    H5Sclose(filespace);
+
+    current_size_ = new_size;
   }
 }
 
 // ------------ method called once each job just before starting event loop  ------------
 void StripDigiHDF5Writer::beginJob() {
-  // please remove this method if not needed
+  h5file_ = H5Fcreate(outputFilename_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+
+  // Define compound datatype
+  memtype_ = H5Tcreate(H5T_COMPOUND, sizeof(DigiEntry));
+  H5Tinsert(memtype_, "event", HOFFSET(DigiEntry, event), H5T_NATIVE_UINT32);
+  H5Tinsert(memtype_, "detid", HOFFSET(DigiEntry, detid), H5T_NATIVE_UINT32);
+  H5Tinsert(memtype_, "strip", HOFFSET(DigiEntry, strip), H5T_NATIVE_INT32);
+  H5Tinsert(memtype_, "adc", HOFFSET(DigiEntry, adc), H5T_NATIVE_INT32);
+  H5Tinsert(memtype_, "x", HOFFSET(DigiEntry, x), H5T_NATIVE_FLOAT);
+  H5Tinsert(memtype_, "y", HOFFSET(DigiEntry, y), H5T_NATIVE_FLOAT);
+  H5Tinsert(memtype_, "z", HOFFSET(DigiEntry, z), H5T_NATIVE_FLOAT);
+
+  hsize_t dims[1] = {0};
+  hsize_t maxdims[1] = {H5S_UNLIMITED};
+  hsize_t chunkdims[1] = {chunk_size_};
+
+  plist_ = H5Pcreate(H5P_DATASET_CREATE);
+  H5Pset_chunk(plist_, 1, chunkdims);
+
+  dataspace_ = H5Screate_simple(1, dims, maxdims);
+  dataset_ = H5Dcreate2(h5file_, "digis", memtype_, dataspace_, H5P_DEFAULT, plist_, H5P_DEFAULT);
 }
 
 // ------------ method called once each job just after ending the event loop  ------------
@@ -173,17 +220,9 @@ void StripDigiHDF5Writer::endJob() {
 
 // ------------ method fills 'descriptions' with the allowed parameters for the module  ------------
 void StripDigiHDF5Writer::fillDescriptions(edm::ConfigurationDescriptions& descriptions) {
-  //The following says we do not know what parameters are allowed so do no validation
-  // Please change this to state exactly what you do use, even if it is no parameters
   edm::ParameterSetDescription desc;
-  desc.setUnknown();
-  descriptions.addDefault(desc);
-
-  //Specify that only 'tracks' is allowed
-  //To use, remove the default given above and uncomment below
-  //edm::ParameterSetDescription desc;
-  //desc.addUntracked<edm::InputTag>("tracks", edm::InputTag("ctfWithMaterialTracks"));
-  //descriptions.addWithDefaultLabel(desc);
+  desc.add<std::string>("outputFile", "strip_digis.h5");
+  descriptions.add("stripDigiHDF5Writer", desc);
 }
 
 //define this as a plug-in
