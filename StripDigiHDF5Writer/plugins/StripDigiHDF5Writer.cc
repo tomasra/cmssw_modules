@@ -78,14 +78,10 @@ private:
   hid_t dataset_;
   hid_t dataspace_;
   hid_t memtype_;
-  hid_t plist_;
 
   struct DigiEntry {
-    uint32_t event;
-    uint32_t detid;
-    int32_t strip;
-    int32_t adc;
-    float x, y, z;
+      int32_t adc;
+      float x, y, z;
   };
 };
 
@@ -102,7 +98,7 @@ private:
 //
 StripDigiHDF5Writer::StripDigiHDF5Writer(const edm::ParameterSet& iConfig)
     : current_size_(0), chunk_size_(1024),
-      h5file_(-1), dataset_(-1), dataspace_(-1), memtype_(-1), plist_(-1) {
+      h5file_(-1), dataset_(-1), dataspace_(-1), memtype_(-1) {
   digiToken_ = consumes<edm::DetSetVector<SiStripDigi>>(
       edm::InputTag("simSiStripDigis", "ZeroSuppressed", "DIGI"));
   tkGeomToken_ = esConsumes<TrackerGeometry, TrackerDigiGeometryRecord>();
@@ -111,11 +107,6 @@ StripDigiHDF5Writer::StripDigiHDF5Writer(const edm::ParameterSet& iConfig)
 }
 
 StripDigiHDF5Writer::~StripDigiHDF5Writer() {
-  if (dataset_ >= 0) H5Dclose(dataset_);
-  if (dataspace_ >= 0) H5Sclose(dataspace_);
-  if (memtype_ >= 0) H5Tclose(memtype_);
-  if (plist_ >= 0) H5Pclose(plist_);
-  if (h5file_ >= 0) H5Fclose(h5file_);
 }
 
 //
@@ -124,98 +115,72 @@ StripDigiHDF5Writer::~StripDigiHDF5Writer() {
 
 // ------------ method called for each event  ------------
 void StripDigiHDF5Writer::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup) {
-  edm::Handle<edm::DetSetVector<SiStripDigi>> digis;
-  iEvent.getByToken(digiToken_, digis);
+    edm::Handle<edm::DetSetVector<SiStripDigi>> digis;
+    iEvent.getByToken(digiToken_, digis);
 
-  const auto& tkGeom = iSetup.getData(tkGeomToken_);
+    const auto& tkGeom = iSetup.getData(tkGeomToken_);
 
-  std::vector<DigiEntry> entries;
+    std::vector<DigiEntry> entries;
 
-  for (const auto& detSet : *digis) {
-    uint32_t detid = detSet.id;
-    const GeomDet* geomDet = tkGeom.idToDet(detid);
-    if (!geomDet) {
-      edm::LogWarning("StripDigiHDF5Writer") << "No GeomDet found for detid " << detid;
-      continue;
+    for (const auto& detSet : *digis) {
+        uint32_t detid = detSet.id;
+        const GeomDet* geomDet = tkGeom.idToDet(detid);
+        if (!geomDet) {
+            edm::LogWarning("StripDigiHDF5Writer") << "No GeomDet found for detid " << detid;
+            continue;
+        }
+
+        const BoundPlane& surface = geomDet->surface();
+
+        for (const auto& digi : detSet.data) {
+            int strip = digi.strip();
+            int adc = digi.adc();
+
+            LocalPoint local(strip * 0.01, 0.0, 0.0);
+            GlobalPoint global = surface.toGlobal(local);
+
+            DigiEntry entry;
+            entry.adc = adc;
+            entry.x = global.x();
+            entry.y = global.y();
+            entry.z = global.z();
+
+            entries.push_back(entry);
+        }
     }
 
-    const BoundPlane& surface = geomDet->surface();
+    if (!entries.empty()) {
+        std::string groupName = "/event_" + std::to_string(iEvent.id().event());
+        hid_t group_id = H5Gcreate2(h5file_, groupName.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-    for (const auto& digi : detSet.data) {
-      int strip = digi.strip();
-      int adc = digi.adc();
+        hsize_t dims[1] = {entries.size()};
+        hid_t dataspace_id = H5Screate_simple(1, dims, NULL);
 
-      LocalPoint local(strip * 0.01, 0.0, 0.0);
-      GlobalPoint global = surface.toGlobal(local);
+        hid_t dset_id = H5Dcreate2(group_id, "digis", memtype_, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-      DigiEntry entry;
-      entry.event = iEvent.id().event();
-      entry.detid = detid;
-      entry.strip = strip;
-      entry.adc = adc;
-      entry.x = global.x();
-      entry.y = global.y();
-      entry.z = global.z();
+        H5Dwrite(dset_id, memtype_, H5S_ALL, H5S_ALL, H5P_DEFAULT, entries.data());
 
-      entries.push_back(entry);
+        H5Dclose(dset_id);
+        H5Sclose(dataspace_id);
+        H5Gclose(group_id);
     }
-  }
-
-  if (!entries.empty()) {
-    hsize_t num_new = entries.size();
-    hsize_t old_size = current_size_;
-    hsize_t new_size = old_size + num_new;
-
-    // Extend dataset
-    H5Dset_extent(dataset_, &new_size);
-
-    // Select hyperslab
-    hid_t filespace = H5Dget_space(dataset_);
-    hsize_t start[1] = {old_size};
-    hsize_t count[1] = {num_new};
-    H5Sselect_hyperslab(filespace, H5S_SELECT_SET, start, NULL, count, NULL);
-
-    // Define memory space
-    hid_t memspace = H5Screate_simple(1, count, NULL);
-
-    // Write data
-    H5Dwrite(dataset_, memtype_, memspace, filespace, H5P_DEFAULT, entries.data());
-
-    H5Sclose(memspace);
-    H5Sclose(filespace);
-
-    current_size_ = new_size;
-  }
 }
 
 // ------------ method called once each job just before starting event loop  ------------
 void StripDigiHDF5Writer::beginJob() {
-  h5file_ = H5Fcreate(outputFilename_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    h5file_ = H5Fcreate(outputFilename_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
 
-  // Define compound datatype
-  memtype_ = H5Tcreate(H5T_COMPOUND, sizeof(DigiEntry));
-  H5Tinsert(memtype_, "event", HOFFSET(DigiEntry, event), H5T_NATIVE_UINT32);
-  H5Tinsert(memtype_, "detid", HOFFSET(DigiEntry, detid), H5T_NATIVE_UINT32);
-  H5Tinsert(memtype_, "strip", HOFFSET(DigiEntry, strip), H5T_NATIVE_INT32);
-  H5Tinsert(memtype_, "adc", HOFFSET(DigiEntry, adc), H5T_NATIVE_INT32);
-  H5Tinsert(memtype_, "x", HOFFSET(DigiEntry, x), H5T_NATIVE_FLOAT);
-  H5Tinsert(memtype_, "y", HOFFSET(DigiEntry, y), H5T_NATIVE_FLOAT);
-  H5Tinsert(memtype_, "z", HOFFSET(DigiEntry, z), H5T_NATIVE_FLOAT);
-
-  hsize_t dims[1] = {0};
-  hsize_t maxdims[1] = {H5S_UNLIMITED};
-  hsize_t chunkdims[1] = {chunk_size_};
-
-  plist_ = H5Pcreate(H5P_DATASET_CREATE);
-  H5Pset_chunk(plist_, 1, chunkdims);
-
-  dataspace_ = H5Screate_simple(1, dims, maxdims);
-  dataset_ = H5Dcreate2(h5file_, "digis", memtype_, dataspace_, H5P_DEFAULT, plist_, H5P_DEFAULT);
+    memtype_ = H5Tcreate(H5T_COMPOUND, sizeof(DigiEntry));
+    H5Tinsert(memtype_, "adc", HOFFSET(DigiEntry, adc), H5T_NATIVE_INT32);
+    H5Tinsert(memtype_, "x", HOFFSET(DigiEntry, x), H5T_NATIVE_FLOAT);
+    H5Tinsert(memtype_, "y", HOFFSET(DigiEntry, y), H5T_NATIVE_FLOAT);
+    H5Tinsert(memtype_, "z", HOFFSET(DigiEntry, z), H5T_NATIVE_FLOAT);
 }
 
 // ------------ method called once each job just after ending the event loop  ------------
 void StripDigiHDF5Writer::endJob() {
-  // please remove this method if not needed
+    H5Tclose(memtype_);
+    H5Fclose(h5file_);
 }
 
 // ------------ method fills 'descriptions' with the allowed parameters for the module  ------------
