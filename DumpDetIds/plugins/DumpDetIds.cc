@@ -179,21 +179,21 @@ void DumpDetIds::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup
   edm::ESHandle<TrackerGeometry> tracker = iSetup.getHandle(tkGeomToken_);
   writeLocalCoordMap(iSetup, "rowcol_to_local.csv");
 
-  std::ofstream out("detids_bpix.json");
-  out << std::fixed << std::setprecision(6);
-  out << "[\n";
+  std::ofstream outBpix("detids_bpix.json");
+  outBpix << std::fixed << std::setprecision(6);
+  outBpix << "[\n";
 
   // BPIX
-  const auto& dets = tracker->detsPXB();
-  for (size_t i = 0; i < dets.size(); ++i) {
-    const PixelGeomDetUnit* pixelDet = dynamic_cast<const PixelGeomDetUnit*>(dets[i]);
+  const auto& detsBpix = tracker->detsPXB();
+  for (size_t i = 0; i < detsBpix.size(); ++i) {
+    const PixelGeomDetUnit* pixelDet = dynamic_cast<const PixelGeomDetUnit*>(detsBpix[i]);
     if (!pixelDet) continue;
     
-    writePixelDetJsonFragment(pixelDet, out);
-    if (i != dets.size() - 1) {
-      out << ",\n";
+    writePixelDetJsonFragment(pixelDet, outBpix);
+    if (i != detsBpix.size() - 1) {
+      outBpix << ",\n";
     } else {
-      out << "\n";
+      outBpix << "\n";
     }
 
     /*
@@ -214,8 +214,29 @@ void DumpDetIds::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup
     }
     */
   }
-  out << "]\n";
-  out.close();
+  outBpix << "]\n";
+  outBpix.close();
+
+  // FPIX
+  std::ofstream outFpix("detids_fpix.json");
+  outFpix << std::fixed << std::setprecision(6);
+  outFpix << "[\n";
+
+  const auto& detsFpix = tracker->detsPXF();
+  for (size_t i = 0; i < detsFpix.size(); ++i) {
+    const PixelGeomDetUnit* pixelDet = dynamic_cast<const PixelGeomDetUnit*>(detsFpix[i]);
+    if (!pixelDet) continue;
+
+    writePixelDetJsonFragment(pixelDet, outFpix);
+    if (i != detsFpix.size() - 1) {
+      outFpix << ",\n";
+    } else {
+      outFpix << "\n";
+    }
+  }
+  outFpix << "]\n";
+  outFpix.close();
+
 
 #ifdef THIS_IS_AN_EVENTSETUP_EXAMPLE
   // if the SetupData is always needed
