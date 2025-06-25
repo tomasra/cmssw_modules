@@ -27,24 +27,22 @@
 // user include files
 #include "DataFormats/GeometryCommonDetAlgo/interface/MeasurementPoint.h"
 #include "DataFormats/GeometryVector/interface/GlobalPoint.h"
+#include "DataFormats/TrackerCommon/interface/PixelBarrelName.h"
+#include "DataFormats/TrackerCommon/interface/PixelEndcapName.h"
+#include "DataFormats/TrackReco/interface/TrackFwd.h"
+
+#include "DataFormats/TrackerCommon/interface/TrackerTopology.h"
 #include "FWCore/Framework/interface/Frameworkfwd.h"
 #include "FWCore/Framework/interface/one/EDAnalyzer.h"
-
 #include "FWCore/Framework/interface/Event.h"
 #include "FWCore/Framework/interface/MakerMacros.h"
-
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
-#include "FWCore/Utilities/interface/EDGetToken.h"
-#include "FWCore/Utilities/interface/InputTag.h"
-#include "DataFormats/TrackReco/interface/Track.h"
-#include "DataFormats/TrackReco/interface/TrackFwd.h"
 
 #include "Geometry/CommonTopologies/interface/PixelGeomDetUnit.h"
 #include "Geometry/CommonTopologies/interface/PixelTopology.h"
-#include "Geometry/TrackerGeometryBuilder/interface/RectangularPixelTopology.h"
 #include "Geometry/TrackerGeometryBuilder/interface/TrackerGeometry.h"
 #include "Geometry/Records/interface/TrackerDigiGeometryRecord.h"
-#include "DataFormats/GeometrySurface/interface/GloballyPositioned.h"
+
 //
 // class declaration
 //
@@ -69,9 +67,12 @@ private:
   void endJob() override;
 
   void writeLocalCoordMap(const edm::EventSetup& iSetup, const std::string& filename);
-  void writePixelDetJsonFragment(const PixelGeomDetUnit* pixelDet, std::ofstream& out);
+  void writePixelDetJsonFragment(const PixelGeomDetUnit* pixelDet, 
+                                 edm::ESHandle<TrackerTopology> trackerTopo,
+                                 std::ofstream& out);
   // ----------member data ---------------------------
   edm::ESGetToken<TrackerGeometry, TrackerDigiGeometryRecord> tkGeomToken_;
+  edm::ESGetToken<TrackerTopology, TrackerTopologyRcd> tTopoToken_;
   
 #ifdef THIS_IS_AN_EVENTSETUP_EXAMPLE
   edm::ESGetToken<SetupData, SetupRecord> setupToken_;
@@ -96,6 +97,7 @@ DumpDetIds::DumpDetIds(const edm::ParameterSet& iConfig) {
 #endif
   //now do what ever initialization is needed
   tkGeomToken_ = esConsumes<TrackerGeometry, TrackerDigiGeometryRecord>();
+  tTopoToken_ = esConsumes<TrackerTopology, TrackerTopologyRcd>();
 }
 
 DumpDetIds::~DumpDetIds() {
@@ -153,7 +155,9 @@ void DumpDetIds::writeLocalCoordMap(const edm::EventSetup& iSetup, const std::st
   edm::LogInfo("DumpDetIds") << "Local coordinate map written to: " << filename;
 }
 
-void DumpDetIds::writePixelDetJsonFragment(const PixelGeomDetUnit* pixelDet, std::ofstream& out) {
+void DumpDetIds::writePixelDetJsonFragment(const PixelGeomDetUnit* pixelDet, 
+                                           edm::ESHandle<TrackerTopology> trackerTopo,
+                                           std::ofstream& out) {
   const DetId detId = pixelDet->geographicalId();
   const GlobalPoint position = pixelDet->position();
   const Surface& surface = pixelDet->surface();
@@ -161,6 +165,24 @@ void DumpDetIds::writePixelDetJsonFragment(const PixelGeomDetUnit* pixelDet, std
 
   out << "  {\n";
   out << "    \"det_id\": " << detId.rawId() << ",\n";
+
+  // Based on: https://github.com/CMSTrackerDPG/SiPixelTools-PixelTrees/blob/master/plugins/DetectorInformation.cc
+  if (detId.subdetId() == static_cast<int>(PixelSubdetector::PixelBarrel)) {
+    PixelBarrelName barrelName(detId);
+    out << "    \"subdet\": \"BPIX\",\n";
+    out << "    \"layer\": "  << trackerTopo->pxbLayer(detId)  << ",\n";
+    out << "    \"ladder\": " << trackerTopo->pxbLadder(detId) << ",\n";
+    out << "    \"module\": " << trackerTopo->pxbModule(detId) << ",\n";
+  } else if (detId.subdetId() == static_cast<int>(PixelSubdetector::PixelEndcap)) {
+    PixelEndcapName endcapName(detId);
+    out << "    \"subdet\": \"FPIX\",\n";
+    out << "    \"disk\": "   << trackerTopo->pxfDisk(detId)  << ",\n";
+    out << "    \"blade\": "  << trackerTopo->pxfBlade(detId)  << ",\n";
+    out << "    \"panel\": "  << trackerTopo->pxfPanel(detId)  << ",\n";
+    out << "    \"module\": " << trackerTopo->pxfModule(detId) << ",\n";
+    out << "    \"side\": "   << trackerTopo->pxfSide(detId) << ",\n";
+  }
+
   out << "    \"position\": [" << position.x() << ", " << position.y() << ", " << position.z() << "],\n";
   out << "    \"rotation\": [\n";
   out << "      [" << rot.xx() << ", " << rot.xy() << ", " << rot.xz() << "],\n";
@@ -177,6 +199,7 @@ void DumpDetIds::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup
   using namespace edm;
 
   edm::ESHandle<TrackerGeometry> tracker = iSetup.getHandle(tkGeomToken_);
+  edm::ESHandle<TrackerTopology> tTopo = iSetup.getHandle(tTopoToken_);
   writeLocalCoordMap(iSetup, "rowcol_to_local.csv");
 
   std::ofstream outBpix("detids_bpix.json");
@@ -189,7 +212,7 @@ void DumpDetIds::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup
     const PixelGeomDetUnit* pixelDet = dynamic_cast<const PixelGeomDetUnit*>(detsBpix[i]);
     if (!pixelDet) continue;
     
-    writePixelDetJsonFragment(pixelDet, outBpix);
+    writePixelDetJsonFragment(pixelDet, tTopo, outBpix);
     if (i != detsBpix.size() - 1) {
       outBpix << ",\n";
     } else {
@@ -227,7 +250,7 @@ void DumpDetIds::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup
     const PixelGeomDetUnit* pixelDet = dynamic_cast<const PixelGeomDetUnit*>(detsFpix[i]);
     if (!pixelDet) continue;
 
-    writePixelDetJsonFragment(pixelDet, outFpix);
+    writePixelDetJsonFragment(pixelDet, tTopo, outFpix);
     if (i != detsFpix.size() - 1) {
       outFpix << ",\n";
     } else {
