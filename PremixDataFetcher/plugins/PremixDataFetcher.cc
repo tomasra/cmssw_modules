@@ -63,7 +63,7 @@ private:
   // ----------member data ---------------------------
   edm::EDGetTokenT<edm::DetSetVector<PixelDigi>> digiToken_;
   TTree* tree_;
-  int event_, detId_, row_, col_, adc_;
+  int event_, detId_, row_, col_, flag_, adc_;
 
 #ifdef THIS_IS_AN_EVENTSETUP_EXAMPLE
   edm::ESGetToken<SetupData, SetupRecord> setupToken_;
@@ -114,6 +114,7 @@ void PremixDataFetcher::analyze(const edm::Event& iEvent, const edm::EventSetup&
     for (const auto& digi : detSet) {
       row_ = digi.row();
       col_ = digi.column();
+      flag_ = digi.flag();
       adc_ = digi.adc();
       tree_->Fill();
     }
@@ -135,6 +136,7 @@ void PremixDataFetcher::beginJob() {
   tree_->Branch("detId", &detId_, "detId/I");
   tree_->Branch("row", &row_, "row/I");
   tree_->Branch("col", &col_, "col/I");
+  tree_->Branch("flag", &flag_, "flag/I");
   tree_->Branch("adc", &adc_, "adc/I");
 }
 
